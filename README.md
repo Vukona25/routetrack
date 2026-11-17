@@ -4,6 +4,23 @@ A full-stack delivery management app for dispatchers and drivers, with a live ro
 
 **Developer:** Vukona Ngwenya
 
+## Screenshots
+
+**Dispatcher dashboard:** live counts, a mini map and active deliveries
+![Dispatcher dashboard](docs/screenshots/dispatcher-dashboard.png)
+
+**Live map:** every active delivery (A = pickup, B = drop-off) and each driver's last shared position
+![Live map](docs/screenshots/live-map.png)
+
+**Deliveries:** filter by status or driver, and search by tracking code, customer or address
+![Deliveries list](docs/screenshots/deliveries.png)
+
+**Delivery details (dark mode):** driving route with distance and travel time, plus directions
+![Delivery details in dark mode](docs/screenshots/delivery-detail-dark.png)
+
+**Driver view:** a driver sees only their own deliveries and can share their location
+![Driver dashboard](docs/screenshots/driver-dashboard.png)
+
 ## Features
 - **Two roles with JWT login:** dispatchers manage everything; drivers see only their own deliveries
 - **Deliveries:** create, assign or reassign drivers, and move each one through

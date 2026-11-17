@@ -459,6 +459,7 @@ tr.clickable:hover td { background: var(--surface-2); }
 /* Live map page: list on the left, map on the right */
 .map-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; }
 .map-side { display: flex; flex-direction: column; gap: 16px; max-height: calc(100vh - 200px); overflow-y: auto; }
+.map-side > * { flex: none; } /* don't squash the list when the window is short */
 .map-main { min-width: 0; }
 .map-selected {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
