@@ -4,8 +4,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('./db');
+const { pool, ensureSchema } = require('./db');
 const { requireAuth, requireRole } = require('./auth');
+const { geocode, getRoute } = require('./geo');
 
 if (!process.env.JWT_SECRET) {
   console.error('JWT_SECRET is missing. Copy .env.example to .env and set it.');
@@ -21,14 +22,17 @@ const NEXT_STATUS = { pending: 'in_transit', in_transit: 'delivered' };
 
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
+const DELIVERY_SELECT = `
+  SELECT d.*,
+         u.name AS driver_name,
+         u.last_lat AS driver_lat,
+         u.last_lng AS driver_lng,
+         u.location_updated_at AS driver_location_at
+  FROM deliveries d
+  LEFT JOIN users u ON u.id = d.driver_id`;
+
 async function findDelivery(id) {
-  const [rows] = await pool.query(
-    `SELECT d.*, u.name AS driver_name
-     FROM deliveries d
-     LEFT JOIN users u ON u.id = d.driver_id
-     WHERE d.id = ?`,
-    [id]
-  );
+  const [rows] = await pool.query(`${DELIVERY_SELECT} WHERE d.id = ?`, [id]);
   return rows[0];
 }
 
@@ -41,6 +45,12 @@ async function logEvent(deliveryId, status, userId, note) {
 
 function canSee(user, delivery) {
   return user.role === 'dispatcher' || delivery.driver_id === user.id;
+}
+
+function pointOf(delivery, which) {
+  const lat = delivery[`${which}_lat`];
+  const lng = delivery[`${which}_lng`];
+  return lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null;
 }
 
 // ---------- Health ----------
@@ -69,12 +79,23 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id, name, email, role } });
 });
 
-// ---------- Drivers (dispatcher only) ----------
+// ---------- Drivers ----------
 app.get('/api/drivers', requireAuth, requireRole('dispatcher'), wrap(async (req, res) => {
   const [rows] = await pool.query(
-    "SELECT id, name, email FROM users WHERE role = 'driver' ORDER BY name"
+    `SELECT u.id, u.name, u.email, u.last_lat, u.last_lng, u.location_updated_at,
+            SUM(d.status IN ('pending', 'in_transit')) AS active_count,
+            SUM(d.status = 'delivered') AS delivered_count
+     FROM users u
+     LEFT JOIN deliveries d ON d.driver_id = u.id
+     WHERE u.role = 'driver'
+     GROUP BY u.id, u.name, u.email, u.last_lat, u.last_lng, u.location_updated_at
+     ORDER BY u.name`
   );
-  res.json(rows);
+  res.json(rows.map((r) => ({
+    ...r,
+    active_count: Number(r.active_count || 0),
+    delivered_count: Number(r.delivered_count || 0),
+  })));
 }));
 
 app.post('/api/drivers', requireAuth, requireRole('dispatcher'), wrap(async (req, res) => {
@@ -98,6 +119,20 @@ app.post('/api/drivers', requireAuth, requireRole('dispatcher'), wrap(async (req
   }
 }));
 
+// A driver's phone or laptop sends its position while location sharing is on
+app.post('/api/me/location', requireAuth, requireRole('driver'), wrap(async (req, res) => {
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'A valid latitude and longitude are required' });
+  }
+  await pool.query(
+    'UPDATE users SET last_lat = ?, last_lng = ?, location_updated_at = NOW() WHERE id = ?',
+    [lat, lng, req.user.id]
+  );
+  res.json({ ok: true });
+}));
+
 // ---------- Stats ----------
 app.get('/api/stats', requireAuth, wrap(async (req, res) => {
   const params = [];
@@ -107,14 +142,19 @@ app.get('/api/stats', requireAuth, wrap(async (req, res) => {
     params.push(req.user.id);
   }
 
-  const [rows] = await pool.query(
-    `SELECT status, COUNT(*) AS count FROM deliveries ${where} GROUP BY status`,
+  const [[row]] = await pool.query(
+    `SELECT COUNT(*) AS total,
+            SUM(status = 'pending') AS pending,
+            SUM(status = 'in_transit') AS in_transit,
+            SUM(status = 'delivered') AS delivered,
+            SUM(status = 'delivered' AND DATE(updated_at) = CURDATE()) AS delivered_today,
+            SUM(status <> 'delivered' AND driver_id IS NULL) AS unassigned
+     FROM deliveries ${where}`,
     params
   );
 
-  const stats = { pending: 0, in_transit: 0, delivered: 0 };
-  rows.forEach((r) => { stats[r.status] = Number(r.count); });
-  stats.total = stats.pending + stats.in_transit + stats.delivered;
+  const stats = {};
+  for (const [key, value] of Object.entries(row)) stats[key] = Number(value || 0);
   res.json(stats);
 }));
 
@@ -134,26 +174,34 @@ app.get('/api/deliveries', requireAuth, wrap(async (req, res) => {
     params.push(Number(driverId));
   }
 
-  if (status && STATUSES.includes(status)) {
+  if (status === 'active') {
+    where.push("d.status IN ('pending', 'in_transit')");
+  } else if (status && STATUSES.includes(status)) {
     where.push('d.status = ?');
     params.push(status);
   }
 
   if (search) {
-    where.push('(d.tracking_code LIKE ? OR d.customer_name LIKE ? OR d.dropoff_address LIKE ?)');
+    where.push('(d.tracking_code LIKE ? OR d.customer_name LIKE ? OR d.pickup_address LIKE ? OR d.dropoff_address LIKE ?)');
     const term = `%${search}%`;
-    params.push(term, term, term);
+    params.push(term, term, term, term);
   }
 
   const [rows] = await pool.query(
-    `SELECT d.*, u.name AS driver_name
-     FROM deliveries d
-     LEFT JOIN users u ON u.id = d.driver_id
+    `${DELIVERY_SELECT}
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY d.updated_at DESC`,
+     ORDER BY FIELD(d.status, 'in_transit', 'pending', 'delivered'), d.updated_at DESC`,
     params
   );
   res.json(rows);
+}));
+
+app.get('/api/deliveries/:id', requireAuth, wrap(async (req, res) => {
+  const delivery = await findDelivery(req.params.id);
+  if (!delivery || !canSee(req.user, delivery)) {
+    return res.status(404).json({ error: 'Delivery not found' });
+  }
+  res.json(delivery);
 }));
 
 app.post('/api/deliveries', requireAuth, requireRole('dispatcher'), wrap(async (req, res) => {
@@ -169,17 +217,24 @@ app.post('/api/deliveries', requireAuth, requireRole('dispatcher'), wrap(async (
     assignedId = drivers[0].id;
   }
 
+  // Put both addresses on the map. If one can't be found the delivery is still saved.
+  const pickup = await geocode(pickupAddress.trim());
+  const dropoff = await geocode(dropoffAddress.trim());
+
   const code = 'DLV-' + crypto.randomBytes(3).toString('hex').toUpperCase();
   const [result] = await pool.query(
     `INSERT INTO deliveries
-      (tracking_code, customer_name, customer_phone, pickup_address, dropoff_address, notes, driver_id, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (tracking_code, customer_name, customer_phone,
+       pickup_address, pickup_lat, pickup_lng,
+       dropoff_address, dropoff_lat, dropoff_lng,
+       notes, driver_id, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       code,
       customerName.trim(),
       customerPhone?.trim() || null,
-      pickupAddress.trim(),
-      dropoffAddress.trim(),
+      pickupAddress.trim(), pickup?.lat ?? null, pickup?.lng ?? null,
+      dropoffAddress.trim(), dropoff?.lat ?? null, dropoff?.lng ?? null,
       notes?.trim() || null,
       assignedId,
       req.user.id,
@@ -232,6 +287,41 @@ app.patch('/api/deliveries/:id/status', requireAuth, wrap(async (req, res) => {
   res.json(await findDelivery(delivery.id));
 }));
 
+// Try the map lookup again (for example after an address was not found)
+app.patch('/api/deliveries/:id/locate', requireAuth, requireRole('dispatcher'), wrap(async (req, res) => {
+  const delivery = await findDelivery(req.params.id);
+  if (!delivery) return res.status(404).json({ error: 'Delivery not found' });
+
+  const pickup = pointOf(delivery, 'pickup') || await geocode(delivery.pickup_address, { fresh: true });
+  const dropoff = pointOf(delivery, 'dropoff') || await geocode(delivery.dropoff_address, { fresh: true });
+
+  await pool.query(
+    'UPDATE deliveries SET pickup_lat = ?, pickup_lng = ?, dropoff_lat = ?, dropoff_lng = ? WHERE id = ?',
+    [pickup?.lat ?? null, pickup?.lng ?? null, dropoff?.lat ?? null, dropoff?.lng ?? null, delivery.id]
+  );
+
+  if (!pickup || !dropoff) {
+    const missing = !pickup && !dropoff ? 'either address' : !pickup ? 'the pickup address' : 'the drop-off address';
+    return res.status(422).json({ error: `Still couldn't find ${missing} on the map. Try adding the suburb and city.` });
+  }
+  res.json(await findDelivery(delivery.id));
+}));
+
+// Driving route between pickup and drop-off (for the map line, distance and ETA)
+app.get('/api/deliveries/:id/route', requireAuth, wrap(async (req, res) => {
+  const delivery = await findDelivery(req.params.id);
+  if (!delivery || !canSee(req.user, delivery)) {
+    return res.status(404).json({ error: 'Delivery not found' });
+  }
+
+  const from = pointOf(delivery, 'pickup');
+  const to = pointOf(delivery, 'dropoff');
+  if (!from || !to) {
+    return res.status(422).json({ error: 'This delivery is not on the map yet' });
+  }
+  res.json(await getRoute(from, to));
+}));
+
 app.get('/api/deliveries/:id/events', requireAuth, wrap(async (req, res) => {
   const delivery = await findDelivery(req.params.id);
   if (!delivery || !canSee(req.user, delivery)) {
@@ -243,7 +333,7 @@ app.get('/api/deliveries/:id/events', requireAuth, wrap(async (req, res) => {
      FROM delivery_events e
      JOIN users u ON u.id = e.changed_by
      WHERE e.delivery_id = ?
-     ORDER BY e.created_at ASC, e.id ASC`,
+     ORDER BY e.created_at DESC, e.id DESC`,
     [delivery.id]
   );
   res.json(rows);
@@ -258,4 +348,12 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`RouteTrack API running on http://localhost:${PORT}`));
+
+ensureSchema()
+  .then(() => {
+    app.listen(PORT, () => console.log(`RouteTrack API running on http://localhost:${PORT}`));
+  })
+  .catch((err) => {
+    console.error(`Could not prepare the database: ${err.message}`);
+    process.exit(1);
+  });

@@ -1,5 +1,9 @@
 import { useState } from 'react';
 import { api } from '../api';
+import { hasCoords } from '../utils';
+import Modal from './Modal';
+import { TextField, SelectField, TextArea } from './Fields';
+import { toast } from './Toast';
 
 const emptyDelivery = {
   customerName: '',
@@ -10,7 +14,7 @@ const emptyDelivery = {
   driverId: '',
 };
 
-export function NewDeliveryForm({ drivers, onCreated, onCancel }) {
+export function NewDeliveryModal({ drivers, onClose, onCreated }) {
   const [form, setForm] = useState(emptyDelivery);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -22,65 +26,75 @@ export function NewDeliveryForm({ drivers, onCreated, onCancel }) {
     setError('');
     setBusy(true);
     try {
-      await api('/deliveries', {
+      const created = await api('/deliveries', {
         method: 'POST',
         body: { ...form, driverId: form.driverId ? Number(form.driverId) : null },
       });
-      setForm(emptyDelivery);
-      onCreated();
+      const onMap = hasCoords(created, 'pickup') && hasCoords(created, 'dropoff');
+      toast(onMap
+        ? `Delivery ${created.tracking_code} created`
+        : `Delivery ${created.tracking_code} created, but an address wasn't found on the map`);
+      onCreated(created);
     } catch (err) {
       setError(err.message);
-    } finally {
       setBusy(false);
     }
   }
 
   return (
-    <form className="card form-grid" onSubmit={handleSubmit}>
-      <h2 className="full">New delivery</h2>
+    <Modal
+      title="New delivery"
+      subtitle="Addresses are placed on the map automatically. Include the suburb and city for the best result."
+      onClose={onClose}
+    >
+      <form className="form-grid" onSubmit={handleSubmit}>
+        <TextField name="customerName" label="Customer name" value={form.customerName} onChange={handleChange} required autoFocus />
+        <TextField name="customerPhone" label="Customer phone" type="tel" value={form.customerPhone} onChange={handleChange} />
+        <div className="span-2">
+          <TextField
+            name="pickupAddress"
+            label="Pickup address"
+            value={form.pickupAddress}
+            onChange={handleChange}
+            required
+            help="e.g. Tembisa Mall, Tembisa"
+          />
+        </div>
+        <div className="span-2">
+          <TextField
+            name="dropoffAddress"
+            label="Drop-off address"
+            value={form.dropoffAddress}
+            onChange={handleChange}
+            required
+            help="e.g. 12 Andrew Mapheto Drive, Tembisa"
+          />
+        </div>
+        <div className="span-2">
+          <SelectField name="driverId" label="Driver" value={form.driverId} onChange={handleChange}>
+            <option value="">Leave unassigned</option>
+            {drivers.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}</option>
+            ))}
+          </SelectField>
+        </div>
+        <div className="span-2">
+          <TextArea name="notes" label="Notes for the driver" value={form.notes} onChange={handleChange} rows={2} />
+        </div>
 
-      <label>
-        Customer name *
-        <input name="customerName" value={form.customerName} onChange={handleChange} required />
-      </label>
-      <label>
-        Customer phone
-        <input name="customerPhone" value={form.customerPhone} onChange={handleChange} />
-      </label>
-      <label>
-        Pickup address *
-        <input name="pickupAddress" value={form.pickupAddress} onChange={handleChange} required />
-      </label>
-      <label>
-        Drop-off address *
-        <input name="dropoffAddress" value={form.dropoffAddress} onChange={handleChange} required />
-      </label>
-      <label>
-        Assign driver
-        <select name="driverId" value={form.driverId} onChange={handleChange}>
-          <option value="">Leave unassigned</option>
-          {drivers.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
-          ))}
-        </select>
-      </label>
-      <label className="full">
-        Notes
-        <textarea name="notes" rows="2" value={form.notes} onChange={handleChange} />
-      </label>
-
-      <div className="form-actions full">
-        {error && <p className="error">{error}</p>}
-        <button type="button" className="btn" onClick={onCancel}>Cancel</button>
-        <button className="btn primary" disabled={busy}>
-          {busy ? 'Saving…' : 'Create delivery'}
-        </button>
-      </div>
-    </form>
+        <div className="span-2 modal-actions">
+          {error && <p className="auth-error grow">{error}</p>}
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn" disabled={busy}>
+            {busy ? 'Finding addresses on the map…' : 'Create delivery'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
-export function AddDriverForm({ onCreated, onCancel }) {
+export function AddDriverModal({ onClose, onCreated }) {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -92,39 +106,40 @@ export function AddDriverForm({ onCreated, onCancel }) {
     setError('');
     setBusy(true);
     try {
-      await api('/drivers', { method: 'POST', body: form });
-      onCreated();
+      const driver = await api('/drivers', { method: 'POST', body: form });
+      toast(`${driver.name} can now log in`);
+      onCreated(driver);
     } catch (err) {
       setError(err.message);
-    } finally {
       setBusy(false);
     }
   }
 
   return (
-    <form className="card form-grid" onSubmit={handleSubmit}>
-      <h2 className="full">Add driver</h2>
+    <Modal title="Add driver" subtitle="The driver logs in with this email and temporary password." onClose={onClose}>
+      <form className="form-grid" onSubmit={handleSubmit}>
+        <div className="span-2">
+          <TextField name="name" label="Full name" value={form.name} onChange={handleChange} required autoFocus />
+        </div>
+        <TextField name="email" label="Email" type="email" value={form.email} onChange={handleChange} required autoComplete="off" />
+        <TextField
+          name="password"
+          label="Temporary password"
+          type="password"
+          value={form.password}
+          onChange={handleChange}
+          required
+          minLength={6}
+          autoComplete="new-password"
+          help="At least 6 characters"
+        />
 
-      <label>
-        Full name *
-        <input name="name" value={form.name} onChange={handleChange} required />
-      </label>
-      <label>
-        Email *
-        <input type="email" name="email" value={form.email} onChange={handleChange} required />
-      </label>
-      <label>
-        Temporary password *
-        <input type="password" name="password" minLength={6} value={form.password} onChange={handleChange} required />
-      </label>
-
-      <div className="form-actions full">
-        {error && <p className="error">{error}</p>}
-        <button type="button" className="btn" onClick={onCancel}>Cancel</button>
-        <button className="btn primary" disabled={busy}>
-          {busy ? 'Saving…' : 'Add driver'}
-        </button>
-      </div>
-    </form>
+        <div className="span-2 modal-actions">
+          {error && <p className="auth-error grow">{error}</p>}
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn" disabled={busy}>{busy ? 'Saving…' : 'Add driver'}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }

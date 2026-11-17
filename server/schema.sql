@@ -7,6 +7,9 @@ CREATE TABLE IF NOT EXISTS users (
   email VARCHAR(150) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   role ENUM('dispatcher', 'driver') NOT NULL,
+  last_lat DECIMAL(10,7) NULL,
+  last_lng DECIMAL(10,7) NULL,
+  location_updated_at TIMESTAMP NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -16,7 +19,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
   customer_name VARCHAR(100) NOT NULL,
   customer_phone VARCHAR(20),
   pickup_address VARCHAR(255) NOT NULL,
+  pickup_lat DECIMAL(10,7) NULL,
+  pickup_lng DECIMAL(10,7) NULL,
   dropoff_address VARCHAR(255) NOT NULL,
+  dropoff_lat DECIMAL(10,7) NULL,
+  dropoff_lng DECIMAL(10,7) NULL,
   notes TEXT,
   status ENUM('pending', 'in_transit', 'delivered') NOT NULL DEFAULT 'pending',
   driver_id INT NULL,

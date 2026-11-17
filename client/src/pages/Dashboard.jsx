@@ -1,243 +1,152 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import { STATUS_LABELS, NEXT_ACTION, formatDate } from '../utils';
-import { NewDeliveryForm, AddDriverForm } from '../components/Forms';
-import HistoryPanel from '../components/HistoryPanel';
+import { Icon } from '../icons';
+import { driverPinOf, greeting } from '../utils';
+import MapView, { MapLegend } from '../components/MapView';
+import StatusBadge from '../components/StatusBadge';
+import DeliveryDetail from '../components/DeliveryDetail';
+import LocationCard from '../components/LocationCard';
+import { NewDeliveryModal } from '../components/Forms';
 
-export default function Dashboard({ user, onLogout }) {
+export default function Dashboard({ user, sharing }) {
   const isDispatcher = user.role === 'dispatcher';
-
-  const [deliveries, setDeliveries] = useState([]);
-  const [stats, setStats] = useState({ total: 0, pending: 0, in_transit: 0, delivered: 0 });
+  const [stats, setStats] = useState(null);
+  const [active, setActive] = useState([]);
   const [drivers, setDrivers] = useState([]);
-  const [filters, setFilters] = useState({ status: '', driverId: '', search: '' });
-  const [panel, setPanel] = useState(null); // 'delivery' | 'driver' | null
-  const [historyFor, setHistoryFor] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const params = new URLSearchParams(Object.entries(filters).filter(([, v]) => v));
-      const [list, statData] = await Promise.all([
-        api(`/deliveries?${params}`),
+      const [s, list, drv] = await Promise.all([
         api('/stats'),
+        api('/deliveries?status=active'),
+        isDispatcher ? api('/drivers') : Promise.resolve([]),
       ]);
-      setDeliveries(list);
-      setStats(statData);
+      setStats(s);
+      setActive(list);
+      setDrivers(drv);
       setError('');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [filters]);
-
-  const loadDrivers = useCallback(async () => {
-    if (!isDispatcher) return;
-    try {
-      setDrivers(await api('/drivers'));
     } catch (err) {
       setError(err.message);
     }
   }, [isDispatcher]);
 
   useEffect(() => {
-    const timer = setTimeout(load, 250); // small delay so search doesn't fire on every keystroke
-    return () => clearTimeout(timer);
+    load();
+    const timer = setInterval(load, 30000);
+    return () => clearInterval(timer);
   }, [load]);
 
-  useEffect(() => {
-    loadDrivers();
-  }, [loadDrivers]);
+  const today = new Date().toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const myPin = !isDispatcher ? active.map(driverPinOf).find(Boolean) : null;
+  const mapDrivers = isDispatcher ? drivers : myPin ? [myPin] : [];
 
-  function updateFilter(e) {
-    const { name, value } = e.target;
-    setFilters((f) => ({ ...f, [name]: value }));
-  }
-
-  async function assignDriver(deliveryId, driverId) {
-    try {
-      await api(`/deliveries/${deliveryId}/assign`, {
-        method: 'PATCH',
-        body: { driverId: driverId ? Number(driverId) : null },
-      });
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function advanceStatus(delivery) {
-    const next = NEXT_ACTION[delivery.status];
-    if (!next) return;
-
-    let note = null;
-    if (next.status === 'delivered') {
-      note = window.prompt('Delivery note (optional), e.g. "Signed by J. Mokoena"', '');
-      if (note === null) return; // cancelled
-    }
-
-    try {
-      await api(`/deliveries/${delivery.id}/status`, {
-        method: 'PATCH',
-        body: { status: next.status, note },
-      });
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  const statCards = [
-    { key: '', label: 'Total', value: stats.total },
-    { key: 'pending', label: 'Pending', value: stats.pending },
-    { key: 'in_transit', label: 'In transit', value: stats.in_transit },
-    { key: 'delivered', label: 'Delivered', value: stats.delivered },
+  const tiles = [
+    { label: isDispatcher ? 'All deliveries' : 'My deliveries', value: stats?.total, icon: 'package' },
+    { label: 'Pending', value: stats?.pending, icon: 'clock' },
+    { label: 'In transit', value: stats?.in_transit, icon: 'truck' },
+    { label: 'Delivered today', value: stats?.delivered_today, icon: 'done' },
   ];
 
   return (
-    <div className="layout">
-      <header className="topbar">
-        <div className="brand">RouteTrack</div>
-        <div className="user-info">
-          <span>{user.name}</span>
-          <span className={`role-tag ${user.role}`}>{user.role}</span>
-          <button className="btn" onClick={onLogout}>Log out</button>
+    <>
+      <div className="page-head">
+        <div>
+          <h1>{greeting()}, {user.name.split(' ')[0]}</h1>
+          <p className="muted">{today}</p>
         </div>
-      </header>
+        {isDispatcher && (
+          <button className="btn" onClick={() => setCreating(true)}>
+            <Icon name="plus" /> New delivery
+          </button>
+        )}
+      </div>
 
-      <main className="content">
-        <section className="stats">
-          {statCards.map((card) => (
-            <button
-              key={card.label}
-              className={`stat-card ${filters.status === card.key ? 'active' : ''}`}
-              onClick={() => setFilters((f) => ({ ...f, status: card.key }))}
-            >
-              <span className="stat-value">{card.value}</span>
-              <span className="stat-label">{card.label}</span>
-            </button>
-          ))}
+      {error && <div className="notice notice-error">{error}</div>}
+
+      <div className="stats">
+        {tiles.map((t) => (
+          <a key={t.label} className="stat" href="#/deliveries">
+            <div className="stat-head">
+              <span className="stat-label">{t.label}</span>
+              <span className="icon-box sm"><Icon name={t.icon} /></span>
+            </div>
+            <div className="stat-value">{t.value ?? '—'}</div>
+          </a>
+        ))}
+      </div>
+
+      {sharing.available && <LocationCard sharing={sharing} />}
+
+      {isDispatcher && stats?.unassigned > 0 && (
+        <a className="alert-card tone-amber" href="#/deliveries">
+          <span className="alert-ic"><Icon name="warning" /></span>
+          <span className="grow">
+            <strong>{stats.unassigned} {stats.unassigned === 1 ? 'delivery needs' : 'deliveries need'} a driver</strong>
+            <span className="small muted">Open Deliveries and assign a driver so they can get going.</span>
+          </span>
+          <span className="chev"><Icon name="chevron" /></span>
+        </a>
+      )}
+
+      <div className="grid grid-2 dash-grid">
+        <section className="card">
+          <div className="card-head">
+            <h3><Icon name="map" /> Live map</h3>
+            <a className="btn btn-secondary btn-sm" href="#/map">Open full map</a>
+          </div>
+          <MapView deliveries={active} drivers={mapDrivers} height={320} onSelect={(d) => setOpenId(d.id)} />
+          <MapLegend showDrivers={mapDrivers.length > 0} />
         </section>
 
-        <section className="toolbar">
-          <input
-            name="search"
-            placeholder="Search tracking code, customer or address…"
-            value={filters.search}
-            onChange={updateFilter}
-          />
-          <select name="status" value={filters.status} onChange={updateFilter}>
-            <option value="">All statuses</option>
-            {Object.entries(STATUS_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
-          {isDispatcher && (
-            <>
-              <select name="driverId" value={filters.driverId} onChange={updateFilter}>
-                <option value="">All drivers</option>
-                <option value="unassigned">Unassigned</option>
-                {drivers.map((d) => (
-                  <option key={d.id} value={d.id}>{d.name}</option>
-                ))}
-              </select>
-              <button className="btn primary" onClick={() => setPanel(panel === 'delivery' ? null : 'delivery')}>
-                + New delivery
-              </button>
-              <button className="btn" onClick={() => setPanel(panel === 'driver' ? null : 'driver')}>
-                + Add driver
-              </button>
-            </>
-          )}
-        </section>
-
-        {panel === 'delivery' && (
-          <NewDeliveryForm
-            drivers={drivers}
-            onCreated={() => { setPanel(null); load(); }}
-            onCancel={() => setPanel(null)}
-          />
-        )}
-        {panel === 'driver' && (
-          <AddDriverForm
-            onCreated={() => { setPanel(null); loadDrivers(); }}
-            onCancel={() => setPanel(null)}
-          />
-        )}
-
-        {error && <p className="error banner">{error}</p>}
-
-        <section className="card table-wrap">
-          {loading ? (
-            <p className="muted pad">Loading deliveries…</p>
-          ) : deliveries.length === 0 ? (
-            <p className="muted pad">No deliveries match these filters.</p>
+        <section className="card">
+          <div className="card-head">
+            <h3><Icon name="truck" /> Active deliveries</h3>
+            <span className="count-pill">{active.length}</span>
+          </div>
+          {active.length === 0 ? (
+            <p className="empty">No active deliveries right now.</p>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Tracking</th>
-                  <th>Customer</th>
-                  <th>Route</th>
-                  <th>Driver</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {deliveries.map((d) => (
-                  <tr key={d.id}>
-                    <td className="mono">{d.tracking_code}</td>
-                    <td>
-                      {d.customer_name}
-                      {d.customer_phone && <div className="muted small">{d.customer_phone}</div>}
-                    </td>
-                    <td>
-                      <div>{d.pickup_address}</div>
-                      <div className="muted small">→ {d.dropoff_address}</div>
-                    </td>
-                    <td>
-                      {isDispatcher ? (
-                        <select
-                          value={d.driver_id || ''}
-                          disabled={d.status === 'delivered'}
-                          onChange={(e) => assignDriver(d.id, e.target.value)}
-                        >
-                          <option value="">Unassigned</option>
-                          {drivers.map((dr) => (
-                            <option key={dr.id} value={dr.id}>{dr.name}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        d.driver_name || '—'
-                      )}
-                    </td>
-                    <td>
-                      <span className={`badge ${d.status}`}>{STATUS_LABELS[d.status]}</span>
-                    </td>
-                    <td className="small">{formatDate(d.updated_at)}</td>
-                    <td className="actions">
-                      {!isDispatcher && NEXT_ACTION[d.status] && (
-                        <button className="btn primary small-btn" onClick={() => advanceStatus(d)}>
-                          {NEXT_ACTION[d.status].label}
-                        </button>
-                      )}
-                      <button className="btn small-btn" onClick={() => setHistoryFor(d)}>
-                        History
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="list-card">
+              {active.slice(0, 6).map((d) => (
+                <button key={d.id} className="list-row" onClick={() => setOpenId(d.id)}>
+                  <span className="icon-box"><Icon name={d.status === 'in_transit' ? 'truck' : 'package'} /></span>
+                  <span className="grow">
+                    <span className="row-title"><span className="mono">{d.tracking_code}</span> · {d.customer_name}</span>
+                    <span className="row-sub">
+                      {d.dropoff_address} · {d.driver_name || 'Unassigned'}
+                    </span>
+                  </span>
+                  <StatusBadge status={d.status} />
+                  <span className="chev"><Icon name="chevron" /></span>
+                </button>
+              ))}
+            </div>
+          )}
+          {active.length > 6 && (
+            <a className="btn-link view-all" href="#/deliveries">View all {active.length} active deliveries</a>
           )}
         </section>
-      </main>
+      </div>
 
-      {historyFor && <HistoryPanel delivery={historyFor} onClose={() => setHistoryFor(null)} />}
-    </div>
+      {openId && (
+        <DeliveryDetail
+          deliveryId={openId}
+          user={user}
+          drivers={drivers}
+          onClose={() => setOpenId(null)}
+          onChanged={load}
+        />
+      )}
+      {creating && (
+        <NewDeliveryModal
+          drivers={drivers}
+          onClose={() => setCreating(false)}
+          onCreated={() => { setCreating(false); load(); }}
+        />
+      )}
+    </>
   );
 }
